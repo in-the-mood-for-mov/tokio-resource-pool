@@ -64,7 +64,6 @@ where
 }
 
 /// The handle to the pool through which resources are requested.
-#[derive(Clone)]
 pub struct Pool<M>
 where
     M: Manage,
@@ -111,6 +110,19 @@ where
             Either::A(machine)
         };
         CheckOutFuture { inner }
+    }
+}
+
+impl<M> Clone for Pool<M>
+where
+    M: Manage,
+    M::Resource: Send,
+{
+    fn clone(&self) -> Self {
+        Self {
+            shared: Arc::clone(&self.shared),
+            return_chute: self.return_chute.clone(),
+        }
     }
 }
 

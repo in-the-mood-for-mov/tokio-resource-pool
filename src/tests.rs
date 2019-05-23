@@ -35,6 +35,10 @@ fn build_pool() -> ThreadPool {
     threadpool::Builder::new().build()
 }
 
+trait ExpectedTraits: Clone + Send {}
+
+impl ExpectedTraits for Pool<TestManager> {}
+
 #[test]
 fn check_out_one_resource() {
     let runtime = build_pool();
