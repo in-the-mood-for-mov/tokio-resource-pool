@@ -64,6 +64,7 @@ where
 }
 
 /// The handle to the pool through which resources are requested.
+#[derive(Clone)]
 pub struct Pool<M>
 where
     M: Manage,
