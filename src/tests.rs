@@ -5,7 +5,7 @@ use futures::future::{ok, Future, FutureResult};
 use futures::lazy;
 use tokio_threadpool::{self as threadpool, ThreadPool};
 
-use crate::{Manage, Pool};
+use crate::{Manage, Pool, CheckOut};
 
 struct TestManager {
     counter: AtomicUsize,
@@ -21,6 +21,8 @@ impl TestManager {
 
 impl Manage for TestManager {
     type Resource = usize;
+
+    type CheckOut = CheckOut<Self>;
 
     type Error = ();
 

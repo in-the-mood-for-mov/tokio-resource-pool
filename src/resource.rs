@@ -1,8 +1,12 @@
 use futures::Future;
 
+use crate::CheckOut;
+
 /// A trait for managing the lifecycle of a resource.
-pub trait Manage {
+pub trait Manage: Sized {
     type Resource: Send;
+
+    type CheckOut: From<CheckOut<Self>>;
 
     type Error;
 

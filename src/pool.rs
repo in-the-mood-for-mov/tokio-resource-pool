@@ -1,65 +1,128 @@
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
+use futures::{Async, Future, Poll, try_ready};
+use futures::future::{Either, FutureResult, ok};
 use futures::sync::mpsc;
-use futures::{Async, Future, Poll};
 use tokio_sync::semaphore;
 
 use crate::librarian::Librarian;
 use crate::machine::{Machine, State, Turn};
 use crate::resource::{Idle, Manage};
 use crate::shared::Shared;
-use futures::future::{ok, Either, FutureResult};
 
 /// A check out of a resource from a `Pool`. The resource is automatically returned when the
 /// `CheckOut` is dropped.
-#[derive(Debug)]
-pub struct CheckOut<R>
+pub struct CheckOut<M>
 where
-    R: Send,
+    M: Manage,
 {
-    resource: Option<R>,
-    sender: mpsc::Sender<Idle<R>>,
+    resource: Option<M::Resource>,
+    pool: Option<Pool<M>>,
 }
 
-impl<R> CheckOut<R>
+impl<M> CheckOut<M>
 where
-    R: Send,
+    M: Manage,
 {
-    pub fn new(resource: R, sender: mpsc::Sender<Idle<R>>) -> Self {
-        let resource = Some(resource);
-        Self { resource, sender }
+    fn new(resource: M::Resource, pool: Pool<M>) -> Self {
+        Self {
+            resource: Some(resource),
+            pool: Some(pool),
+        }
+    }
+
+    /// Lends the resource to an opaque asynchronous computation.
+    ///
+    /// Like in real life, it is usually a bad idea to lend things you don't own. If the
+    /// subcomputation finishes with an error, the resource is lost. `LentCheckOut` takes care of
+    /// notifying the pool of that so new resources can be created.
+    ///
+    /// This is necessary in situation where a resource is taken by value.
+    pub fn lend<F, T, B>(mut self, borrower: B) -> LentCheckOut<M, F, T>
+    where
+        F: Future<Item = (M::Resource, T)>,
+        B: FnOnce(M::Resource) -> F,
+    {
+        LentCheckOut {
+            inner: borrower(self.resource.take().unwrap()),
+            pool: self.pool.take(),
+        }
     }
 }
 
-impl<R> Deref for CheckOut<R>
+impl<M> Deref for CheckOut<M>
 where
-    R: Send,
+    M: Manage,
 {
-    type Target = R;
+    type Target = M::Resource;
 
     fn deref(&self) -> &Self::Target {
         self.resource.as_ref().unwrap()
     }
 }
 
-impl<R> DerefMut for CheckOut<R>
+impl<M> DerefMut for CheckOut<M>
 where
-    R: Send,
+    M: Manage,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.resource.as_mut().unwrap()
     }
 }
 
-impl<R> Drop for CheckOut<R>
+impl<M> Drop for CheckOut<M>
 where
-    R: Send,
+    M: Manage,
 {
     fn drop(&mut self) {
-        let resource = self.resource.take().unwrap();
-        self.sender.try_send(Idle::new(resource)).unwrap();
+        if let (Some(resource), Some(mut pool)) = (self.resource.take(), self.pool.take()) {
+            pool.return_chute.try_send(Idle::new(resource)).unwrap();
+        }
+    }
+}
+
+/// A future where a resource is lent to an opaque, asynchronous computation.
+pub struct LentCheckOut<M, F, T>
+where
+    M: Manage,
+    F: Future<Item = (M::Resource, T)>,
+{
+    inner: F,
+    pool: Option<Pool<M>>,
+}
+
+impl<M, F, T> Future for LentCheckOut<M, F, T>
+where
+    M: Manage,
+    F: Future<Item = (M::Resource, T)>,
+{
+    type Item = (M::CheckOut, T);
+
+    type Error = F::Error;
+
+    fn poll(&mut self) -> Result<Async<Self::Item>, Self::Error> {
+        let (resource, t) = try_ready!(self.inner.poll());
+        Ok(Async::Ready((
+            CheckOut {
+                resource: Some(resource),
+                pool: self.pool.take(),
+            }.into(),
+            t,
+        )))
+    }
+}
+
+impl<M, F, T> Drop for LentCheckOut<M, F, T>
+where
+    M: Manage,
+    F: Future<Item = (M::Resource, T)>,
+{
+    fn drop(&mut self) {
+        if let Some(pool) = self.pool.take() {
+            pool.shared.created_count.fetch_sub(1, Ordering::SeqCst);
+        }
     }
 }
 
@@ -94,19 +157,16 @@ where
     }
 
     /// Starts the process of checking out a resource.
-    pub fn check_out(&self) -> CheckOutFuture<M> {
+    pub fn check_out(&self) -> CheckOutFuture<M>
+    {
         let mut permit = semaphore::Permit::new();
         let inner = if let Ok(()) = permit.try_acquire(&self.shared.checked_out_count) {
             let idle_resource = self.shared.shelf.pop().unwrap();
             let resource = idle_resource.into_resource();
-            let entry = CheckOut::new(resource, self.return_chute.clone());
+            let entry = CheckOut::new(resource, self.clone()).into();
             Either::B(ok(entry))
         } else {
-            let context = CheckOutContext {
-                shared: Arc::clone(&self.shared),
-                return_chute: self.return_chute.clone(),
-            };
-            let machine = Machine::new(CheckOutState::Start, context);
+            let machine = Machine::new(CheckOutState::Start, self.clone());
             Either::A(machine)
         };
         CheckOutFuture { inner }
@@ -132,28 +192,20 @@ pub struct CheckOutFuture<M>
 where
     M: Manage,
 {
-    inner: Either<Machine<CheckOutState<M>>, FutureResult<CheckOut<M::Resource>, M::Error>>,
+    inner: Either<Machine<CheckOutState<M>>, FutureResult<M::CheckOut, M::Error>>,
 }
 
 impl<M> Future for CheckOutFuture<M>
 where
     M: Manage,
 {
-    type Item = CheckOut<M::Resource>;
+    type Item = M::CheckOut;
 
     type Error = M::Error;
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         self.inner.poll()
     }
-}
-
-struct CheckOutContext<M>
-where
-    M: Manage,
-{
-    shared: Arc<Shared<M>>,
-    return_chute: mpsc::Sender<Idle<M::Resource>>,
 }
 
 enum CheckOutState<M>
@@ -169,7 +221,7 @@ impl<M> CheckOutState<M>
 where
     M: Manage,
 {
-    fn on_start(context: &mut CheckOutContext<M>) -> Result<Turn<Self>, <Self as State>::Error> {
+    fn on_start(context: &mut Pool<M>) -> Result<Turn<Self>, <Self as State>::Error> {
         loop {
             let created_count = context.shared.created_count.load(Ordering::SeqCst);
             if created_count == context.shared.capacity {
@@ -192,7 +244,7 @@ where
 
     fn on_creating(
         mut future: M::Future,
-        _context: &mut CheckOutContext<M>,
+        _context: &mut Pool<M>,
     ) -> Result<Turn<Self>, <Self as State>::Error> {
         match future.poll()? {
             Async::NotReady => Ok(Turn::Suspend(CheckOutState::Creating { future })),
@@ -202,7 +254,7 @@ where
 
     fn on_wait(
         mut permit: semaphore::Permit,
-        context: &mut CheckOutContext<M>,
+        context: &mut Pool<M>,
     ) -> Result<Turn<Self>, <Self as State>::Error> {
         match permit
             .poll_acquire(&context.shared.checked_out_count)
@@ -222,11 +274,11 @@ where
 {
     type Final = M::Resource;
 
-    type Item = CheckOut<M::Resource>;
+    type Item = M::CheckOut;
 
     type Error = M::Error;
 
-    type Context = CheckOutContext<M>;
+    type Context = Pool<M>;
 
     fn turn(state: Self, context: &mut Self::Context) -> Result<Turn<Self>, Self::Error> {
         match state {
@@ -238,7 +290,7 @@ where
         }
     }
 
-    fn finalize(fin: Self::Final, context: Self::Context) -> Result<Self::Item, Self::Error> {
-        Ok(CheckOut::new(fin, context.return_chute))
+    fn finalize(fin: Self::Final, pool: Self::Context) -> Result<Self::Item, Self::Error> {
+        Ok(CheckOut::new(fin, pool).into())
     }
 }

@@ -11,7 +11,7 @@
 //! use redis::{RedisError, RedisResult};
 //! use tokio;
 //!
-//! use tokio_resource_pool::{Manage, Pool};
+//! use tokio_resource_pool::{CheckOut, Manage, Pool};
 //!
 //! struct RedisConnectionManager {
 //!     client: redis::Client,
@@ -26,6 +26,8 @@
 //!
 //! impl Manage for RedisConnectionManager {
 //!     type Resource = redis::Connection;
+//!
+//!     type CheckOut = CheckOut<Self>;
 //!
 //!     type Error = RedisError;
 //!
@@ -67,7 +69,7 @@
 //! [`bb8`]: https://crates.io/crates/bb8
 
 pub use crate::librarian::Librarian;
-pub use crate::pool::{CheckOut, CheckOutFuture, Pool};
+pub use crate::pool::{CheckOut, CheckOutFuture, LentCheckOut, Pool};
 pub use crate::resource::Manage;
 
 mod librarian;
