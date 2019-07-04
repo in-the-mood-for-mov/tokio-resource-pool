@@ -1,16 +1,30 @@
+use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
-use futures::{Async, Future, Poll, try_ready};
-use futures::future::{Either, FutureResult, ok};
+use crossbeam_queue::ArrayQueue;
+use futures::future::{ok, Either, FutureResult};
 use futures::sync::mpsc;
-use tokio_sync::semaphore;
+use futures::{try_ready, Async, Future, Poll};
+use tokio_sync::semaphore::{self, Semaphore};
 
 use crate::librarian::Librarian;
 use crate::machine::{Machine, State, Turn};
-use crate::resource::{Idle, Manage};
-use crate::shared::Shared;
+use crate::resource::{Idle, Manage, Status};
+
+pub trait Env {
+    fn now() -> Instant;
+}
+
+pub struct DefaultEnv;
+
+impl Env for DefaultEnv {
+    fn now() -> Instant {
+        Instant::now()
+    }
+}
 
 /// A check out of a resource from a `Pool`. The resource is automatically returned when the
 /// `CheckOut` is dropped.
@@ -19,6 +33,7 @@ where
     M: Manage,
 {
     resource: Option<M::Resource>,
+    recycled_at: Instant,
     pool: Option<Pool<M>>,
 }
 
@@ -26,9 +41,10 @@ impl<M> CheckOut<M>
 where
     M: Manage,
 {
-    fn new(resource: M::Resource, pool: Pool<M>) -> Self {
+    fn new(resource: M::Resource, recycled_at: Instant, pool: Pool<M>) -> Self {
         Self {
             resource: Some(resource),
+            recycled_at,
             pool: Some(pool),
         }
     }
@@ -47,6 +63,7 @@ where
     {
         LentCheckOut {
             inner: borrower(self.resource.take().unwrap()),
+            recycled_at: self.recycled_at,
             pool: self.pool.take(),
         }
     }
@@ -78,7 +95,13 @@ where
 {
     fn drop(&mut self) {
         if let (Some(resource), Some(mut pool)) = (self.resource.take(), self.pool.take()) {
-            pool.return_chute.try_send(Idle::new(resource)).unwrap();
+            match pool.shared.manager.status(&resource) {
+                Status::Valid => pool
+                    .return_chute
+                    .try_send(Idle::new(resource, self.recycled_at))
+                    .unwrap(),
+                Status::Invalid => (),
+            }
         }
     }
 }
@@ -90,6 +113,7 @@ where
     F: Future<Item = (M::Resource, T)>,
 {
     inner: F,
+    recycled_at: Instant,
     pool: Option<Pool<M>>,
 }
 
@@ -107,8 +131,10 @@ where
         Ok(Async::Ready((
             CheckOut {
                 resource: Some(resource),
+                recycled_at: self.recycled_at,
                 pool: self.pool.take(),
-            }.into(),
+            }
+            .into(),
             t,
         )))
     }
@@ -121,16 +147,34 @@ where
 {
     fn drop(&mut self) {
         if let Some(pool) = self.pool.take() {
-            pool.shared.created_count.fetch_sub(1, Ordering::SeqCst);
+            pool.notify_of_lost_resource()
         }
     }
+}
+
+pub struct Shared<M>
+where
+    M: Manage,
+{
+    pub capacity: usize,
+
+    /// Resources on the shelf are ready to be borrowed. You must increment `checked_out_count`
+    /// before grabbing one though.
+    pub shelf: ArrayQueue<Idle<M::Resource>>,
+
+    pub checked_out_count: Semaphore,
+
+    pub created_count: AtomicUsize,
+
+    pub manager: M,
+
+    pub recycle_interval: Duration,
 }
 
 /// The handle to the pool through which resources are requested.
 pub struct Pool<M>
 where
     M: Manage,
-    M::Resource: Send,
 {
     shared: Arc<Shared<M>>,
 
@@ -144,39 +188,58 @@ where
     M: Manage,
     M::Resource: Send,
 {
-    /// Create a new pool, with its associated `Librarian`.
-    pub fn new(capacity: usize, manager: M) -> (Self, Librarian<M>) {
-        let (sender, receiver) = mpsc::channel(capacity);
-        let shared = Arc::new(Shared::new(capacity, manager));
-        let librarian = Librarian::new(shared.clone(), receiver);
-        let pool = Self {
-            shared,
-            return_chute: sender,
-        };
-        (pool, librarian)
+    /// Starts the process of checking out a resource.
+    pub fn check_out(&self) -> CheckOutFuture<M, DefaultEnv> {
+        self.check_out_with_environment::<DefaultEnv>()
     }
 
-    /// Starts the process of checking out a resource.
-    pub fn check_out(&self) -> CheckOutFuture<M>
-    {
+    pub fn check_out_with_environment<E: Env>(&self) -> CheckOutFuture<M, E> {
         let mut permit = semaphore::Permit::new();
         let inner = if let Ok(()) = permit.try_acquire(&self.shared.checked_out_count) {
             let idle_resource = self.shared.shelf.pop().unwrap();
-            let resource = idle_resource.into_resource();
-            let entry = CheckOut::new(resource, self.clone()).into();
-            Either::B(ok(entry))
+            if self.is_stale::<E>(&idle_resource) {
+                let context = CheckOutContext { pool: self.clone() };
+                let future = self.recycle(idle_resource);
+                let machine = Machine::new(CheckOutState::Recycling { future }, context);
+                Either::A(machine)
+            } else {
+                let recycled_at = idle_resource.recycled_at();
+                let resource = idle_resource.into_resource();
+                let entry = CheckOut::new(resource, recycled_at, self.clone()).into();
+                Either::B(ok(entry))
+            }
         } else {
-            let machine = Machine::new(CheckOutState::Start, self.clone());
+            let context = CheckOutContext { pool: self.clone() };
+            let machine = Machine::new(CheckOutState::start(), context);
             Either::A(machine)
         };
         CheckOutFuture { inner }
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.shared.capacity
+    }
+
+    pub fn recycle_interval(&self) -> Duration {
+        self.shared.recycle_interval
+    }
+
+    pub(crate) fn recycle(&self, resource: Idle<M::Resource>) -> M::RecycleFuture {
+        self.shared.manager.recycle(resource.into_resource())
+    }
+
+    pub(crate) fn is_stale<E: Env>(&self, idle_resource: &Idle<M::Resource>) -> bool {
+        E::now() > idle_resource.recycled_at() + self.recycle_interval()
+    }
+
+    pub(crate) fn notify_of_lost_resource(&self) {
+        self.shared.created_count.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
 impl<M> Clone for Pool<M>
 where
     M: Manage,
-    M::Resource: Send,
 {
     fn clone(&self) -> Self {
         Self {
@@ -186,18 +249,24 @@ where
     }
 }
 
+type CheckOutStateMachine<M, E> = Machine<CheckOutState<M, E>>;
+type ImmediatelyAvailable<M> = FutureResult<<M as Manage>::CheckOut, <M as Manage>::Error>;
+type CheckOutFutureInner<M, E> = Either<CheckOutStateMachine<M, E>, ImmediatelyAvailable<M>>;
+
 /// A `Future` that will yield a resource from the pool on completion.
 #[must_use = "futures do nothing unless polled"]
-pub struct CheckOutFuture<M>
+pub struct CheckOutFuture<M, E>
 where
     M: Manage,
+    E: Env,
 {
-    inner: Either<Machine<CheckOutState<M>>, FutureResult<M::CheckOut, M::Error>>,
+    inner: CheckOutFutureInner<M, E>,
 }
 
-impl<M> Future for CheckOutFuture<M>
+impl<M, E> Future for CheckOutFuture<M, E>
 where
     M: Manage,
+    E: Env,
 {
     type Item = M::CheckOut;
 
@@ -208,89 +277,173 @@ where
     }
 }
 
-enum CheckOutState<M>
+struct CheckOutContext<M>
 where
     M: Manage,
 {
-    Start,
-    Creating { future: M::Future },
-    Wait { permit: semaphore::Permit },
+    pool: Pool<M>,
 }
 
-impl<M> CheckOutState<M>
+enum CheckOutState<M, E>
 where
     M: Manage,
+    E: Env,
 {
-    fn on_start(context: &mut Pool<M>) -> Result<Turn<Self>, <Self as State>::Error> {
+    Start { _environment: PhantomData<E> },
+    Creating { future: M::CreateFuture },
+    Wait { permit: semaphore::Permit },
+    Recycling { future: M::RecycleFuture },
+}
+
+impl<M, E> CheckOutState<M, E>
+where
+    M: Manage,
+    E: Env,
+{
+    fn start() -> Self {
+        CheckOutState::Start {
+            _environment: PhantomData,
+        }
+    }
+
+    fn on_start(context: &mut CheckOutContext<M>) -> Result<Turn<Self>, <Self as State>::Error> {
         loop {
-            let created_count = context.shared.created_count.load(Ordering::SeqCst);
-            if created_count == context.shared.capacity {
+            let pool = &mut context.pool;
+            let created_count = pool.shared.created_count.load(Ordering::SeqCst);
+            if created_count == pool.shared.capacity {
                 return Ok(Turn::Continue(CheckOutState::Wait {
                     permit: semaphore::Permit::new(),
                 }));
             }
 
-            let swap_result = context.shared.created_count.compare_and_swap(
+            let swap_result = pool.shared.created_count.compare_and_swap(
                 created_count,
                 created_count + 1,
                 Ordering::SeqCst,
             );
             if created_count == swap_result {
-                let future = context.shared.manager.create();
+                let future = pool.shared.manager.create();
                 return Ok(Turn::Continue(CheckOutState::Creating { future }));
             }
         }
     }
 
     fn on_creating(
-        mut future: M::Future,
-        _context: &mut Pool<M>,
+        mut future: M::CreateFuture,
+        _context: &mut CheckOutContext<M>,
     ) -> Result<Turn<Self>, <Self as State>::Error> {
         match future.poll()? {
             Async::NotReady => Ok(Turn::Suspend(CheckOutState::Creating { future })),
-            Async::Ready(resource) => Ok(Turn::Done(resource)),
+            Async::Ready(resource) => Ok(Turn::Done(Idle::new(resource, E::now()))),
         }
     }
 
     fn on_wait(
         mut permit: semaphore::Permit,
-        context: &mut Pool<M>,
+        context: &mut CheckOutContext<M>,
     ) -> Result<Turn<Self>, <Self as State>::Error> {
-        match permit
-            .poll_acquire(&context.shared.checked_out_count)
-            .unwrap()
-        {
+        let poll = permit
+            .poll_acquire(&context.pool.shared.checked_out_count)
+            .unwrap();
+        match poll {
             Async::NotReady => Ok(Turn::Suspend(CheckOutState::Wait { permit })),
-            Async::Ready(()) => Ok(Turn::Done(
-                context.shared.shelf.pop().unwrap().into_resource(),
-            )),
+            Async::Ready(()) => {
+                let idle_resource = context.pool.shared.shelf.pop().unwrap();
+                if context.pool.is_stale::<E>(&idle_resource) {
+                    let future = context.pool.recycle(idle_resource);
+                    Ok(Turn::Continue(CheckOutState::Recycling { future }))
+                } else {
+                    Ok(Turn::Done(idle_resource))
+                }
+            }
+        }
+    }
+
+    fn on_recycling(
+        mut future: M::RecycleFuture,
+        context: &mut CheckOutContext<M>,
+    ) -> Result<Turn<Self>, <Self as State>::Error> {
+        match future.poll() {
+            Ok(Async::NotReady) => Ok(Turn::Suspend(CheckOutState::Recycling { future })),
+            Ok(Async::Ready(Some(resource))) => Ok(Turn::Done(Idle::new(resource, E::now()))),
+            Ok(Async::Ready(None)) | Err(_) => {
+                context.pool.notify_of_lost_resource();
+                Ok(Turn::Continue(CheckOutState::start()))
+            }
         }
     }
 }
 
-impl<M> State for CheckOutState<M>
+impl<M, E> State for CheckOutState<M, E>
 where
     M: Manage,
+    E: Env,
 {
-    type Final = M::Resource;
+    type Final = Idle<M::Resource>;
 
     type Item = M::CheckOut;
 
     type Error = M::Error;
 
-    type Context = Pool<M>;
+    type Context = CheckOutContext<M>;
 
     fn turn(state: Self, context: &mut Self::Context) -> Result<Turn<Self>, Self::Error> {
         match state {
-            CheckOutState::Start => Self::on_start(context),
-
+            CheckOutState::Start { .. } => Self::on_start(context),
             CheckOutState::Creating { future } => Self::on_creating(future, context),
-
             CheckOutState::Wait { permit } => Self::on_wait(permit, context),
+            CheckOutState::Recycling { future } => Self::on_recycling(future, context),
         }
     }
 
-    fn finalize(fin: Self::Final, pool: Self::Context) -> Result<Self::Item, Self::Error> {
-        Ok(CheckOut::new(fin, pool).into())
+    fn finalize(resource: Self::Final, context: Self::Context) -> Result<Self::Item, Self::Error> {
+        let recycled_at = resource.recycled_at();
+        Ok(CheckOut::new(resource.into_resource(), recycled_at, context.pool).into())
+    }
+}
+
+pub struct Builder {
+    recycle_interval: Duration,
+}
+
+impl Builder {
+    pub fn new() -> Self {
+        Self {
+            recycle_interval: Duration::from_secs(30),
+        }
+    }
+
+    pub fn recycle_interval(mut self, recycle_interval: Duration) -> Self {
+        self.recycle_interval = recycle_interval;
+        self
+    }
+
+    pub fn build<M>(self, capacity: usize, manager: M) -> (Pool<M>, Librarian<M>)
+    where
+        M: Manage,
+    {
+        let (sender, receiver) = mpsc::channel(capacity);
+
+        let shared = Arc::new(Shared {
+            capacity,
+            shelf: ArrayQueue::new(capacity),
+            checked_out_count: Semaphore::new(0),
+            created_count: AtomicUsize::new(0),
+            manager,
+            recycle_interval: self.recycle_interval,
+        });
+
+        let pool = Pool {
+            shared: shared.clone(),
+            return_chute: sender,
+        };
+        let librarian = Librarian::new(shared, receiver);
+        (pool, librarian)
+    }
+}
+
+impl Default for Builder {
+    fn default() -> Self {
+        Self::new()
     }
 }

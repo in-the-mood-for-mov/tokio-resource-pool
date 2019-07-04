@@ -4,8 +4,8 @@ use futures::stream::Stream;
 use futures::sync::mpsc;
 use futures::{Async, Future, Poll};
 
+use crate::pool::Shared;
 use crate::resource::Idle;
-use crate::shared::Shared;
 use crate::Manage;
 
 /// A `Future` that manages the internal state of a `Pool`.

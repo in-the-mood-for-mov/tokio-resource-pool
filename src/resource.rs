@@ -1,6 +1,11 @@
+use crate::pool::CheckOut;
 use futures::Future;
+use std::time::Instant;
 
-use crate::CheckOut;
+pub enum Status {
+    Valid,
+    Invalid,
+}
 
 /// A trait for managing the lifecycle of a resource.
 pub trait Manage: Sized {
@@ -10,9 +15,18 @@ pub trait Manage: Sized {
 
     type Error;
 
-    type Future: Future<Item = Self::Resource, Error = Self::Error>;
+    type CreateFuture: Future<Item = Self::Resource, Error = Self::Error>;
 
-    fn create(&self) -> Self::Future;
+    /// Creates a new instance of the managed resource.
+    fn create(&self) -> Self::CreateFuture;
+
+    fn status(&self, resource: &Self::Resource) -> Status;
+
+    type RecycleFuture: Future<Item = Option<Self::Resource>, Error = Self::Error>;
+
+    /// Recycling a resource is done periodically to determine whether it is still valid and can be
+    /// reused or if it is broken and must be discarded.
+    fn recycle(&self, resource: Self::Resource) -> Self::RecycleFuture;
 }
 
 #[derive(Debug)]
@@ -21,17 +35,25 @@ where
     R: Send,
 {
     resource: R,
+    recycled_at: Instant,
 }
 
 impl<R> Idle<R>
 where
     R: Send,
 {
-    pub fn new(resource: R) -> Self {
-        Self { resource }
+    pub fn new(resource: R, recycled_at: Instant) -> Self {
+        Self {
+            resource,
+            recycled_at,
+        }
     }
 
     pub fn into_resource(self) -> R {
         self.resource
+    }
+
+    pub fn recycled_at(&self) -> Instant {
+        self.recycled_at
     }
 }
