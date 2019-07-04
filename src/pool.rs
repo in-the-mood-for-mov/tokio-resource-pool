@@ -255,7 +255,7 @@ type CheckOutFutureInner<M, E> = Either<CheckOutStateMachine<M, E>, ImmediatelyA
 
 /// A `Future` that will yield a resource from the pool on completion.
 #[must_use = "futures do nothing unless polled"]
-pub struct CheckOutFuture<M, E>
+pub struct CheckOutFuture<M, E = DefaultEnv>
 where
     M: Manage,
     E: Env,
