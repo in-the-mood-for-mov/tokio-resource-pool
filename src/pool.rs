@@ -100,7 +100,7 @@ where
                     .return_chute
                     .try_send(Idle::new(resource, self.recycled_at))
                     .unwrap(),
-                Status::Invalid => (),
+                Status::Invalid => pool.notify_of_lost_resource(),
             }
         }
     }
