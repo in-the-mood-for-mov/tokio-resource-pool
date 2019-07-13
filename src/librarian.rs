@@ -46,7 +46,7 @@ where
                 Ok(Async::Ready(None)) => return Ok(Async::Ready(())),
                 Ok(Async::Ready(Some(idle_resource))) => {
                     self.pool.shelf.push(idle_resource).unwrap();
-                    self.pool.checked_out_count.add_permits(1);
+                    self.pool.resources_on_shelf.add_permits(1);
                 }
             }
         }

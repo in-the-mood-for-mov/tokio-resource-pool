@@ -158,11 +158,12 @@ where
 {
     pub capacity: usize,
 
-    /// Resources on the shelf are ready to be borrowed. You must increment `checked_out_count`
-    /// before grabbing one though.
+    /// Resources on the shelf are ready to be borrowed.
     pub shelf: ArrayQueue<Idle<M::Resource>>,
 
-    pub checked_out_count: Semaphore,
+    /// The number of resources on the shelf. You need to take a permit from this semaphore before
+    /// taking a resource from the shelf.
+    pub resources_on_shelf: Semaphore,
 
     pub created_count: AtomicUsize,
 
@@ -195,7 +196,7 @@ where
 
     pub fn check_out_with_environment<E: Env>(&self) -> CheckOutFuture<M, E> {
         let mut permit = semaphore::Permit::new();
-        let inner = if let Ok(()) = permit.try_acquire(&self.shared.checked_out_count) {
+        let inner = if let Ok(()) = permit.try_acquire(&self.shared.resources_on_shelf) {
             let idle_resource = self.shared.shelf.pop().unwrap();
             if self.is_stale::<E>(&idle_resource) {
                 let context = CheckOutContext { pool: self.clone() };
@@ -343,7 +344,7 @@ where
         context: &mut CheckOutContext<M>,
     ) -> Result<Turn<Self>, <Self as State>::Error> {
         let poll = permit
-            .poll_acquire(&context.pool.shared.checked_out_count)
+            .poll_acquire(&context.pool.shared.resources_on_shelf)
             .unwrap();
         match poll {
             Async::NotReady => Ok(Turn::Suspend(CheckOutState::Wait { permit })),
@@ -427,7 +428,7 @@ impl Builder {
         let shared = Arc::new(Shared {
             capacity,
             shelf: ArrayQueue::new(capacity),
-            checked_out_count: Semaphore::new(0),
+            resources_on_shelf: Semaphore::new(0),
             created_count: AtomicUsize::new(0),
             manager,
             recycle_interval: self.recycle_interval,
