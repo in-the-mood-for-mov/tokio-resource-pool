@@ -94,14 +94,37 @@ where
     M: Manage,
 {
     fn drop(&mut self) {
-        if let (Some(resource), Some(mut pool)) = (self.resource.take(), self.pool.take()) {
-            match pool.shared.manager.status(&resource) {
-                Status::Valid => pool
+        let (resource, mut pool) =
+            if let (Some(resource), Some(pool)) = (self.resource.take(), self.pool.take()) {
+                (resource, pool)
+            } else {
+                return;
+            };
+
+        let error = match pool.shared.manager.status(&resource) {
+            Status::Valid => {
+                let result = pool
                     .return_chute
-                    .try_send(Idle::new(resource, self.recycled_at))
-                    .unwrap(),
-                Status::Invalid => pool.notify_of_lost_resource(),
+                    .try_send(Idle::new(resource, self.recycled_at));
+                if let Err(error) = result {
+                    pool.notify_of_lost_resource();
+                    error
+                } else {
+                    return;
+                }
             }
+            Status::Invalid => {
+                pool.notify_of_lost_resource();
+                return;
+            }
+        };
+
+        if error.is_full() {
+            error!("encountered a full channel while returning a resource to the pool");
+        } else if error.is_disconnected() {
+            // The librarian has been dropped, this happens when the runtime is being shut down.
+        } else {
+            error!("{}", error);
         }
     }
 }

@@ -135,6 +135,22 @@ pub use crate::librarian::Librarian;
 pub use crate::pool::{Builder, CheckOut, CheckOutFuture, LentCheckOut, Pool};
 pub use crate::resource::{Manage, Status};
 
+#[cfg(test)]
+use std;
+
+#[cfg(test)]
+macro_rules! error {
+    ($($args:expr),+) => { $crate::std::assert!(false, $($args),+) }
+}
+
+#[cfg(not(test))]
+use log;
+
+#[cfg(not(test))]
+macro_rules! error {
+    ($($args:expr),+) => { $crate::log::error!($($args),+) }
+}
+
 mod librarian;
 mod machine;
 mod pool;
