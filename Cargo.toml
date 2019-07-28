@@ -1,6 +1,6 @@
 [package]
 name = "tokio-resource-pool"
-version = "0.3.2"
+version = "0.4.0"
 license = "MIT"
 authors = ["Simon Génier <1782845+animalsiknow@users.noreply.github.com>"]
 edition = "2018"
