@@ -1,4 +1,3 @@
-use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -11,13 +10,13 @@ use tokio_sync::semaphore::{self, Semaphore};
 use crate::machine::{Machine, State, Turn};
 use crate::resource::{Idle, Manage, Status};
 
-pub trait Env {
+pub trait Dependencies {
     fn now() -> Instant;
 }
 
-pub struct DefaultEnv;
+pub enum RealDependencies {}
 
-impl Env for DefaultEnv {
+impl Dependencies for RealDependencies {
     fn now() -> Instant {
         Instant::now()
     }
@@ -205,8 +204,8 @@ where
         self.manager.recycle(resource.into_resource())
     }
 
-    pub fn is_stale<E: Env>(&self, idle_resource: &Idle<M::Resource>) -> bool {
-        E::now() > idle_resource.recycled_at() + self.recycle_interval
+    pub fn is_stale(&self, idle_resource: &Idle<M::Resource>) -> bool {
+        M::Dependencies::now() > idle_resource.recycled_at() + self.recycle_interval
     }
 }
 
@@ -223,17 +222,12 @@ where
     M: Manage,
     M::Resource: Send,
 {
-    /// Starts the process of checking out a resource.
-    pub fn check_out(&self) -> CheckOutFuture<M, DefaultEnv> {
-        self.check_out_with_environment::<DefaultEnv>()
-    }
-
-    pub fn check_out_with_environment<E: Env>(&self) -> CheckOutFuture<M, E> {
+    pub fn check_out(&self) -> CheckOutFuture<M> {
         let mut permit = semaphore::Permit::new();
         let inner = match permit.try_acquire(&self.shared.shelf_size) {
             Ok(()) => {
                 let idle_resource = self.shared.shelf.pop().unwrap();
-                if self.shared.is_stale::<E>(&idle_resource) {
+                if self.shared.is_stale(&idle_resource) {
                     let context = CheckOutContext {
                         shared: Arc::clone(&self.shared),
                     };
@@ -286,24 +280,22 @@ where
     }
 }
 
-type CheckOutStateMachine<M, E> = Machine<CheckOutState<M, E>>;
+type CheckOutStateMachine<M> = Machine<CheckOutState<M>>;
 type ImmediatelyAvailable<M> = FutureResult<<M as Manage>::CheckOut, <M as Manage>::Error>;
-type CheckOutFutureInner<M, E> = Either<CheckOutStateMachine<M, E>, ImmediatelyAvailable<M>>;
+type CheckOutFutureInner<M> = Either<CheckOutStateMachine<M>, ImmediatelyAvailable<M>>;
 
 /// A `Future` that will yield a resource from the pool on completion.
 #[must_use = "futures do nothing unless polled"]
-pub struct CheckOutFuture<M, E = DefaultEnv>
+pub struct CheckOutFuture<M>
 where
     M: Manage,
-    E: Env,
 {
-    inner: CheckOutFutureInner<M, E>,
+    inner: CheckOutFutureInner<M>,
 }
 
-impl<M, E> Future for CheckOutFuture<M, E>
+impl<M> Future for CheckOutFuture<M>
 where
     M: Manage,
-    E: Env,
 {
     type Item = M::CheckOut;
 
@@ -321,13 +313,11 @@ where
     shared: Arc<Shared<M>>,
 }
 
-enum CheckOutState<M, E>
+enum CheckOutState<M>
 where
     M: Manage,
-    E: Env,
 {
     Start {
-        _environment: PhantomData<E>,
         shelf_size_ticket: semaphore::Permit,
         shelf_free_space_ticket: semaphore::Permit,
     },
@@ -339,14 +329,12 @@ where
     },
 }
 
-impl<M, E> CheckOutState<M, E>
+impl<M> CheckOutState<M>
 where
     M: Manage,
-    E: Env,
 {
     fn start() -> Self {
         CheckOutState::Start {
-            _environment: PhantomData,
             shelf_size_ticket: semaphore::Permit::new(),
             shelf_free_space_ticket: semaphore::Permit::new(),
         }
@@ -364,7 +352,7 @@ where
             shelf_size_ticket.forget();
             shelf_free_space_ticket.forget();
             let idle_resource = context.shared.shelf.pop().unwrap();
-            if context.shared.is_stale::<E>(&idle_resource) {
+            if context.shared.is_stale(&idle_resource) {
                 let future = context.shared.recycle(idle_resource);
                 return Ok(Turn::Continue(CheckOutState::Recycling { future }));
             } else {
@@ -383,7 +371,6 @@ where
         }
 
         Ok(Turn::Suspend(CheckOutState::Start {
-            _environment: PhantomData,
             shelf_size_ticket,
             shelf_free_space_ticket,
         }))
@@ -395,7 +382,7 @@ where
     ) -> Result<Turn<Self>, <Self as State>::Error> {
         match future.poll()? {
             Async::NotReady => Ok(Turn::Suspend(CheckOutState::Creating { future })),
-            Async::Ready(resource) => Ok(Turn::Done(Idle::new(resource, E::now()))),
+            Async::Ready(resource) => Ok(Turn::Done(Idle::new(resource, M::Dependencies::now()))),
         }
     }
 
@@ -405,7 +392,9 @@ where
     ) -> Result<Turn<Self>, <Self as State>::Error> {
         match future.poll() {
             Ok(Async::NotReady) => Ok(Turn::Suspend(CheckOutState::Recycling { future })),
-            Ok(Async::Ready(Some(resource))) => Ok(Turn::Done(Idle::new(resource, E::now()))),
+            Ok(Async::Ready(Some(resource))) => {
+                Ok(Turn::Done(Idle::new(resource, M::Dependencies::now())))
+            }
             Ok(Async::Ready(None)) | Err(_) => {
                 context.shared.notify_of_lost_resource();
                 Ok(Turn::Continue(CheckOutState::start()))
@@ -414,10 +403,9 @@ where
     }
 }
 
-impl<M, E> State for CheckOutState<M, E>
+impl<M> State for CheckOutState<M>
 where
     M: Manage,
-    E: Env,
 {
     type Final = Idle<M::Resource>;
 

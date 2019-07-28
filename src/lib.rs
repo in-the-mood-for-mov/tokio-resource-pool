@@ -13,7 +13,7 @@
 //! use redis::r#async::{Connection, ConnectionLike};
 //! use tokio;
 //!
-//! use tokio_resource_pool::{Builder, CheckOut, Manage, Pool, Status};
+//! use tokio_resource_pool::{Builder, CheckOut, Manage, Pool, Status, RealDependencies};
 //!
 //! struct RedisManager {
 //!     client: redis::Client,
@@ -28,6 +28,8 @@
 //!
 //! impl Manage for RedisManager {
 //!     type Resource = Connection;
+//!
+//!     type Dependencies = RealDependencies;
 //!
 //!     type CheckOut = RedisCheckOut;
 //!
@@ -130,7 +132,9 @@
 //!
 //! [`bb8`]: https://crates.io/crates/bb8
 
-pub use crate::pool::{Builder, CheckOut, CheckOutFuture, LentCheckOut, Pool};
+pub use crate::pool::{
+    Builder, CheckOut, CheckOutFuture, Dependencies, LentCheckOut, Pool, RealDependencies,
+};
 pub use crate::resource::{Manage, Status};
 
 mod machine;

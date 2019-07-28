@@ -7,11 +7,11 @@ use std::time::{Duration, Instant};
 
 use futures::future::{ok, Future, FutureResult};
 use futures::lazy;
+use log::{Level, LevelFilter, Log, Metadata, Record};
 use tokio_threadpool::{self as threadpool, ThreadPool};
-use log::{Log, Metadata, Record, Level, LevelFilter};
 
-use crate::pool::Env;
-use crate::{Builder, CheckOut, CheckOutFuture, Manage, Pool, Status};
+use crate::pool::Dependencies;
+use crate::{Builder, CheckOut, Manage, Pool, Status};
 
 thread_local! {
     static NOW: RefCell<Arc<Mutex<Instant>>> = RefCell::new(Arc::new(Mutex::new(Instant::now())));
@@ -39,8 +39,7 @@ impl Log for PanicOnError {
         }
     }
 
-    fn flush(&self) {
-    }
+    fn flush(&self) {}
 }
 
 #[test]
@@ -51,9 +50,9 @@ fn panics_on_error() {
     log::error!("test")
 }
 
-struct TestEnvironment;
+struct TestDependencies;
 
-impl Env for TestEnvironment {
+impl Dependencies for TestDependencies {
     fn now() -> Instant {
         NOW.with(|now| {
             let arc = now.borrow();
@@ -82,6 +81,8 @@ impl TestManager {
 
 impl Manage for TestManager {
     type Resource = Resource;
+
+    type Dependencies = TestDependencies;
 
     type CheckOut = CheckOut<Self>;
 
@@ -133,10 +134,6 @@ trait ExpectedTraits: Clone + Send {}
 
 impl ExpectedTraits for Pool<TestManager> {}
 
-fn check_out(pool: &Pool<TestManager>) -> CheckOutFuture<TestManager, TestEnvironment> {
-    pool.check_out_with_environment::<TestEnvironment>()
-}
-
 #[test]
 fn check_out_one_resource() {
     PanicOnError::init();
@@ -145,7 +142,7 @@ fn check_out_one_resource() {
 
     let builder = Builder::new();
     let pool = builder.build(4, TestManager::new());
-    let handle = runtime.spawn_handle(check_out(&pool));
+    let handle = runtime.spawn_handle(pool.check_out());
     assert_eq!(handle.wait().unwrap().id, 0);
 }
 
@@ -157,10 +154,10 @@ fn check_out_all_resources() {
 
     let builder = Builder::new();
     let pool = builder.build(4, TestManager::new());
-    let entry_0 = runtime.spawn_handle(check_out(&pool)).wait().unwrap();
-    let entry_1 = runtime.spawn_handle(check_out(&pool)).wait().unwrap();
-    let entry_2 = runtime.spawn_handle(check_out(&pool)).wait().unwrap();
-    let entry_3 = runtime.spawn_handle(check_out(&pool)).wait().unwrap();
+    let entry_0 = runtime.spawn_handle(pool.check_out()).wait().unwrap();
+    let entry_1 = runtime.spawn_handle(pool.check_out()).wait().unwrap();
+    let entry_2 = runtime.spawn_handle(pool.check_out()).wait().unwrap();
+    let entry_3 = runtime.spawn_handle(pool.check_out()).wait().unwrap();
     assert_eq!(entry_0.id, 0);
     assert_eq!(entry_1.id, 1);
     assert_eq!(entry_2.id, 2);
@@ -175,12 +172,12 @@ fn check_out_more_resources() {
 
     let builder = Builder::new();
     let pool = builder.build(4, TestManager::new());
-    let entry_0 = runtime.spawn_handle(check_out(&pool)).wait().unwrap();
-    let _entry_1 = runtime.spawn_handle(check_out(&pool)).wait().unwrap();
-    let _entry_2 = runtime.spawn_handle(check_out(&pool)).wait().unwrap();
-    let _entry_3 = runtime.spawn_handle(check_out(&pool)).wait().unwrap();
+    let entry_0 = runtime.spawn_handle(pool.check_out()).wait().unwrap();
+    let _entry_1 = runtime.spawn_handle(pool.check_out()).wait().unwrap();
+    let _entry_2 = runtime.spawn_handle(pool.check_out()).wait().unwrap();
+    let _entry_3 = runtime.spawn_handle(pool.check_out()).wait().unwrap();
 
-    let mut handle = runtime.spawn_handle(pool.check_out_with_environment::<TestEnvironment>());
+    let mut handle = runtime.spawn_handle(pool.check_out());
     let handle = runtime
         .spawn_handle(lazy(move || {
             assert!(handle.poll().unwrap().is_not_ready());
@@ -206,7 +203,7 @@ fn recycle_resource() {
         .build(1, TestManager::new());
 
     for _ in 0..2 {
-        let resource = runtime.spawn_handle(check_out(&pool)).wait().unwrap();
+        let resource = runtime.spawn_handle(pool.check_out()).wait().unwrap();
         assert_eq!(0, resource.id);
         assert_eq!(0, resource.recycle_count);
     }
@@ -217,7 +214,7 @@ fn recycle_resource() {
     }
 
     for _ in 0..2 {
-        let resource = runtime.spawn_handle(check_out(&pool)).wait().unwrap();
+        let resource = runtime.spawn_handle(pool.check_out()).wait().unwrap();
         assert_eq!(0, resource.id);
         assert_eq!(1, resource.recycle_count);
     }

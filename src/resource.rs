@@ -1,4 +1,4 @@
-use crate::pool::CheckOut;
+use crate::pool::{CheckOut, Dependencies};
 use futures::Future;
 use std::time::Instant;
 
@@ -10,6 +10,9 @@ pub enum Status {
 /// A trait for managing the lifecycle of a resource.
 pub trait Manage: Sized {
     type Resource: Send;
+
+    // TODO: Default to `RealDependencies` when associated type defaults are stabilized.
+    type Dependencies: Dependencies;
 
     type CheckOut: From<CheckOut<Self>>;
 
