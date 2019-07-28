@@ -1,9 +1,10 @@
 [package]
 name = "tokio-resource-pool"
-version = "0.4.0"
+version = "0.4.1"
 license = "MIT"
 authors = ["Simon Génier <1782845+animalsiknow@users.noreply.github.com>"]
 edition = "2018"
+readme = "README.md"
 description = "A generic resource pool for the Tokio ecosystem."
 repository = "https://github.com/animalsiknow/tokio-resource-pool"
 documentation = "https://docs.rs/tokio-resource-pool"
