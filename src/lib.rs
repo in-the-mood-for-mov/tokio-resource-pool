@@ -10,7 +10,7 @@
 //! use futures::{try_ready, Async, Poll};
 //! use futures::future::{lazy, Future, FutureResult, IntoFuture};
 //! use redis::{RedisError, RedisFuture, RedisResult};
-//! use redis::r#async::{Connection, ConnectionLike};
+//! use redis::aio::{Connection, ConnectionLike};
 //! use tokio;
 //!
 //! use tokio_resource_pool::{Builder, CheckOut, Manage, Pool, Status, RealDependencies};
