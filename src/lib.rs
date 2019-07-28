@@ -2,9 +2,8 @@
 //!
 //! # Example
 //!
-//! To use it, you need to implment `Manage` for your resource, and then create a `Pool` with its
-//! background worker, spawn the worker. Once this is done, you can request a resource by calling
-//! `Pool::check_out`.
+//! To use it, you need to implment `Manage` for your resource, and then use the `Builder` to create
+//! a `Pool`. Once this is done, you can request a resource by calling `Pool::check_out`.
 //!
 //! ```
 //! use futures::{try_ready, Async, Poll};
