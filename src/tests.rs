@@ -8,12 +8,47 @@ use std::time::{Duration, Instant};
 use futures::future::{ok, Future, FutureResult};
 use futures::lazy;
 use tokio_threadpool::{self as threadpool, ThreadPool};
+use log::{Log, Metadata, Record, Level, LevelFilter};
 
 use crate::pool::Env;
 use crate::{Builder, CheckOut, CheckOutFuture, Manage, Pool, Status};
 
 thread_local! {
     static NOW: RefCell<Arc<Mutex<Instant>>> = RefCell::new(Arc::new(Mutex::new(Instant::now())));
+}
+
+struct PanicOnError;
+
+static PANIC_ON_ERROR: PanicOnError = PanicOnError;
+
+impl PanicOnError {
+    pub fn init() {
+        let _ = log::set_logger(&PANIC_ON_ERROR);
+        log::set_max_level(LevelFilter::Error);
+    }
+}
+
+impl Log for PanicOnError {
+    fn enabled(&self, metadata: &Metadata) -> bool {
+        metadata.level() == Level::Error
+    }
+
+    fn log(&self, record: &Record) {
+        if self.enabled(&record.metadata()) {
+            panic!("{}: {}", record.level(), record.args());
+        }
+    }
+
+    fn flush(&self) {
+    }
+}
+
+#[test]
+#[should_panic]
+fn panics_on_error() {
+    PanicOnError::init();
+
+    log::error!("test")
 }
 
 struct TestEnvironment;
@@ -104,6 +139,8 @@ fn check_out(pool: &Pool<TestManager>) -> CheckOutFuture<TestManager, TestEnviro
 
 #[test]
 fn check_out_one_resource() {
+    PanicOnError::init();
+
     let (runtime, _) = build_pool();
 
     let builder = Builder::new();
@@ -114,6 +151,8 @@ fn check_out_one_resource() {
 
 #[test]
 fn check_out_all_resources() {
+    PanicOnError::init();
+
     let (runtime, _) = build_pool();
 
     let builder = Builder::new();
@@ -130,6 +169,8 @@ fn check_out_all_resources() {
 
 #[test]
 fn check_out_more_resources() {
+    PanicOnError::init();
+
     let (runtime, _) = build_pool();
 
     let builder = Builder::new();
@@ -156,6 +197,8 @@ fn check_out_more_resources() {
 
 #[test]
 fn recycle_resource() {
+    PanicOnError::init();
+
     let (runtime, now) = build_pool();
 
     let pool = Builder::new()

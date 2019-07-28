@@ -11,10 +11,10 @@ keywords = ["tokio", "pool"]
 categories = ["asynchronous"]
 
 [dependencies]
-crossbeam-queue = "0.1.2"
-futures = "0.1.28"
-log = "0.4.7"
-tokio-sync = "0.1.6"
+crossbeam-queue = "0.1"
+futures = "0.1"
+log = "0.4"
+tokio-sync = "0.1"
 
 [dev-dependencies]
 redis = "0.10.0"

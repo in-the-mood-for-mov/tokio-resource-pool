@@ -133,19 +133,6 @@
 pub use crate::pool::{Builder, CheckOut, CheckOutFuture, LentCheckOut, Pool};
 pub use crate::resource::{Manage, Status};
 
-#[cfg(test)]
-macro_rules! error {
-    ($($args:expr),+) => { assert!(false, $($args),+) }
-}
-
-#[cfg(not(test))]
-use log;
-
-#[cfg(not(test))]
-macro_rules! error {
-    ($($args:expr),+) => { $crate::log::error!($($args),+) }
-}
-
 mod machine;
 mod pool;
 mod resource;

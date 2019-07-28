@@ -3,7 +3,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crossbeam_queue::ArrayQueue;
+use crossbeam_queue::{ArrayQueue, PushError};
 use futures::future::{ok, Either, FutureResult};
 use futures::{try_ready, Async, Future, Poll};
 use tokio_sync::semaphore::{self, Semaphore};
@@ -101,10 +101,15 @@ where
         match shared.manager.status(&resource) {
             Status::Valid => {
                 let idle_resource = Idle::new(resource, self.recycled_at);
-                if let Err(_) = shared.shelf.push(idle_resource) {
-                    error!("encountered a full channel while returning a resource to the pool");
+                match shared.shelf.push(idle_resource) {
+                    Ok(_) => shared.shelf_size.add_permits(1),
+                    Err(PushError(_)) => {
+                        log::error!(
+                            "encountered a full channel while returning a resource to the pool"
+                        );
+                        shared.shelf_free_space.add_permits(1);
+                    }
                 }
-                shared.shelf_size.add_permits(1);
             }
             Status::Invalid => {
                 shared.notify_of_lost_resource();
