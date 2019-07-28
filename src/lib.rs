@@ -104,8 +104,7 @@
 //! # fn main() -> RedisResult<()> {
 //! let manager = RedisManager::new("redis://127.0.0.1/")?;
 //! tokio::run(lazy(move || {
-//!     let (pool, librarian) = Builder::new().build(4, manager);
-//!     tokio::spawn(librarian);
+//!     let pool = Builder::new().build(4, manager);
 //!     tokio::spawn(
 //!         pool.check_out()
 //!             .and_then(|connection| {
@@ -131,16 +130,12 @@
 //!
 //! [`bb8`]: https://crates.io/crates/bb8
 
-pub use crate::librarian::Librarian;
 pub use crate::pool::{Builder, CheckOut, CheckOutFuture, LentCheckOut, Pool};
 pub use crate::resource::{Manage, Status};
 
 #[cfg(test)]
-use std;
-
-#[cfg(test)]
 macro_rules! error {
-    ($($args:expr),+) => { $crate::std::assert!(false, $($args),+) }
+    ($($args:expr),+) => { assert!(false, $($args),+) }
 }
 
 #[cfg(not(test))]
@@ -151,7 +146,6 @@ macro_rules! error {
     ($($args:expr),+) => { $crate::log::error!($($args),+) }
 }
 
-mod librarian;
 mod machine;
 mod pool;
 mod resource;

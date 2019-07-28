@@ -107,8 +107,7 @@ fn check_out_one_resource() {
     let (runtime, _) = build_pool();
 
     let builder = Builder::new();
-    let (pool, librarian) = builder.build(4, TestManager::new());
-    runtime.spawn(librarian);
+    let pool = builder.build(4, TestManager::new());
     let handle = runtime.spawn_handle(check_out(&pool));
     assert_eq!(handle.wait().unwrap().id, 0);
 }
@@ -118,8 +117,7 @@ fn check_out_all_resources() {
     let (runtime, _) = build_pool();
 
     let builder = Builder::new();
-    let (pool, librarian) = builder.build(4, TestManager::new());
-    runtime.spawn(librarian);
+    let pool = builder.build(4, TestManager::new());
     let entry_0 = runtime.spawn_handle(check_out(&pool)).wait().unwrap();
     let entry_1 = runtime.spawn_handle(check_out(&pool)).wait().unwrap();
     let entry_2 = runtime.spawn_handle(check_out(&pool)).wait().unwrap();
@@ -135,8 +133,7 @@ fn check_out_more_resources() {
     let (runtime, _) = build_pool();
 
     let builder = Builder::new();
-    let (pool, librarian) = builder.build(4, TestManager::new());
-    runtime.spawn(librarian);
+    let pool = builder.build(4, TestManager::new());
     let entry_0 = runtime.spawn_handle(check_out(&pool)).wait().unwrap();
     let _entry_1 = runtime.spawn_handle(check_out(&pool)).wait().unwrap();
     let _entry_2 = runtime.spawn_handle(check_out(&pool)).wait().unwrap();
@@ -161,10 +158,9 @@ fn check_out_more_resources() {
 fn recycle_resource() {
     let (runtime, now) = build_pool();
 
-    let (pool, librarian) = Builder::new()
+    let pool = Builder::new()
         .recycle_interval(Duration::from_secs(30))
         .build(1, TestManager::new());
-    runtime.spawn(librarian);
 
     for _ in 0..2 {
         let resource = runtime.spawn_handle(check_out(&pool)).wait().unwrap();
