@@ -1,6 +1,8 @@
-use crate::pool::{CheckOut, Dependencies};
-use futures::Future;
+use std::future::Future;
 use std::time::Instant;
+
+use crate::pool::{CheckOut, Dependencies};
+use crate::RealDependencies;
 
 pub enum Status {
     Valid,
@@ -11,21 +13,20 @@ pub enum Status {
 pub trait Manage: Sized {
     type Resource: Send;
 
-    // TODO: Default to `RealDependencies` when associated type defaults are stabilized.
-    type Dependencies: Dependencies;
+    type Dependencies: Dependencies = RealDependencies;
 
     type CheckOut: From<CheckOut<Self>>;
 
     type Error;
 
-    type CreateFuture: Future<Item = Self::Resource, Error = Self::Error>;
+    type CreateFuture: Future<Output = Result<Self::Resource, Self::Error>>;
 
     /// Creates a new instance of the managed resource.
     fn create(&self) -> Self::CreateFuture;
 
     fn status(&self, resource: &Self::Resource) -> Status;
 
-    type RecycleFuture: Future<Item = Option<Self::Resource>, Error = Self::Error>;
+    type RecycleFuture: Future<Output = Result<Option<Self::Resource>, Self::Error>>;
 
     /// Recycling a resource is done periodically to determine whether it is still valid and can be
     /// reused or if it is broken and must be discarded.

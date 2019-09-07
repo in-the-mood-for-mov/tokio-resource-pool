@@ -5,7 +5,9 @@
 //! To use it, you need to implment `Manage` for your resource, and then use the `Builder` to create
 //! a `Pool`. Once this is done, you can request a resource by calling `Pool::check_out`.
 //!
-//! ```
+//! ```ignore
+//! // TODO: Update this example when `redis` supports `tokio` 0.2.
+//!
 //! use futures::{try_ready, Async, Poll};
 //! use futures::future::{lazy, Future, FutureResult, IntoFuture};
 //! use redis::{RedisError, RedisFuture, RedisResult};
@@ -131,12 +133,11 @@
 //!
 //! [`bb8`]: https://crates.io/crates/bb8
 
-pub use crate::pool::{
-    Builder, CheckOut, CheckOutFuture, Dependencies, LentCheckOut, Pool, RealDependencies,
-};
+#![feature(associated_type_defaults)]
+
+pub use crate::pool::{Builder, CheckOut, Dependencies, Pool, RealDependencies};
 pub use crate::resource::{Manage, Status};
 
-mod machine;
 mod pool;
 mod resource;
 

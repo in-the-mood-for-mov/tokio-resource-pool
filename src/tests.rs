@@ -1,53 +1,20 @@
 use std::cell::RefCell;
+use std::future::Future;
 use std::mem;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::thread_local;
 use std::time::{Duration, Instant};
 
-use futures::future::{ok, Future, FutureResult};
-use futures::lazy;
-use log::{Level, LevelFilter, Log, Metadata, Record};
-use tokio_threadpool::{self as threadpool, ThreadPool};
+use futures::future::{ok, Ready};
 
 use crate::pool::Dependencies;
 use crate::{Builder, CheckOut, Manage, Pool, Status};
 
 thread_local! {
     static NOW: RefCell<Arc<Mutex<Instant>>> = RefCell::new(Arc::new(Mutex::new(Instant::now())));
-}
-
-struct PanicOnError;
-
-static PANIC_ON_ERROR: PanicOnError = PanicOnError;
-
-impl PanicOnError {
-    pub fn init() {
-        let _ = log::set_logger(&PANIC_ON_ERROR);
-        log::set_max_level(LevelFilter::Error);
-    }
-}
-
-impl Log for PanicOnError {
-    fn enabled(&self, metadata: &Metadata) -> bool {
-        metadata.level() == Level::Error
-    }
-
-    fn log(&self, record: &Record) {
-        if self.enabled(&record.metadata()) {
-            panic!("{}: {}", record.level(), record.args());
-        }
-    }
-
-    fn flush(&self) {}
-}
-
-#[test]
-#[should_panic]
-fn panics_on_error() {
-    PanicOnError::init();
-
-    log::error!("test")
 }
 
 struct TestDependencies;
@@ -88,7 +55,7 @@ impl Manage for TestManager {
 
     type Error = ();
 
-    type CreateFuture = FutureResult<Self::Resource, Self::Error>;
+    type CreateFuture = Ready<Result<Self::Resource, Self::Error>>;
 
     fn create(&self) -> Self::CreateFuture {
         let resource = Resource {
@@ -102,7 +69,7 @@ impl Manage for TestManager {
         Status::Valid
     }
 
-    type RecycleFuture = FutureResult<Option<Self::Resource>, Self::Error>;
+    type RecycleFuture = Ready<Result<Option<Self::Resource>, Self::Error>>;
 
     fn recycle(&self, mut resource: Self::Resource) -> Self::RecycleFuture {
         resource.recycle_count += 1;
@@ -110,112 +77,103 @@ impl Manage for TestManager {
     }
 }
 
-fn init_environment(now: Arc<Mutex<Instant>>) {
+fn init_dependencies() {
     NOW.with(|thread_now| {
-        thread_now.replace(now);
+        thread_now.replace(Arc::new(Mutex::new(Instant::now())));
     })
-}
-
-fn build_pool() -> (ThreadPool, Arc<Mutex<Instant>>) {
-    let now = Arc::new(Mutex::new(Instant::now()));
-    // When calling SpawnHandle::wait, the future may run on the calling thread in addition to any
-    // thread in the pool.
-    init_environment(Arc::clone(&now));
-
-    let pool_now = Arc::clone(&now);
-    let pool = threadpool::Builder::new()
-        .after_start(move || init_environment(Arc::clone(&pool_now)))
-        .build();
-
-    (pool, now)
 }
 
 trait ExpectedTraits: Clone + Send {}
 
 impl ExpectedTraits for Pool<TestManager> {}
 
-#[test]
-fn check_out_one_resource() {
-    PanicOnError::init();
-
-    let (runtime, _) = build_pool();
+#[tokio::test]
+async fn check_out_one_resource() {
+    init_dependencies();
 
     let builder = Builder::new();
     let pool = builder.build(4, TestManager::new());
-    let handle = runtime.spawn_handle(pool.check_out());
-    assert_eq!(handle.wait().unwrap().id, 0);
+
+    let check_out = pool.check_out().await.unwrap();
+    assert_eq!(check_out.id, 0);
 }
 
-#[test]
-fn check_out_all_resources() {
-    PanicOnError::init();
-
-    let (runtime, _) = build_pool();
+#[tokio::test]
+async fn check_out_all_resources() {
+    init_dependencies();
 
     let builder = Builder::new();
     let pool = builder.build(4, TestManager::new());
-    let entry_0 = runtime.spawn_handle(pool.check_out()).wait().unwrap();
-    let entry_1 = runtime.spawn_handle(pool.check_out()).wait().unwrap();
-    let entry_2 = runtime.spawn_handle(pool.check_out()).wait().unwrap();
-    let entry_3 = runtime.spawn_handle(pool.check_out()).wait().unwrap();
-    assert_eq!(entry_0.id, 0);
-    assert_eq!(entry_1.id, 1);
-    assert_eq!(entry_2.id, 2);
-    assert_eq!(entry_3.id, 3);
+
+    let check_out_0 = pool.check_out().await.unwrap();
+    let check_out_1 = pool.check_out().await.unwrap();
+    let check_out_2 = pool.check_out().await.unwrap();
+    let check_out_3 = pool.check_out().await.unwrap();
+
+    assert_eq!(check_out_0.id, 0);
+    assert_eq!(check_out_1.id, 1);
+    assert_eq!(check_out_2.id, 2);
+    assert_eq!(check_out_3.id, 3);
 }
 
-#[test]
-fn check_out_more_resources() {
-    PanicOnError::init();
-
-    let (runtime, _) = build_pool();
+#[tokio::test]
+async fn check_out_more_resources() {
+    init_dependencies();
 
     let builder = Builder::new();
     let pool = builder.build(4, TestManager::new());
-    let entry_0 = runtime.spawn_handle(pool.check_out()).wait().unwrap();
-    let _entry_1 = runtime.spawn_handle(pool.check_out()).wait().unwrap();
-    let _entry_2 = runtime.spawn_handle(pool.check_out()).wait().unwrap();
-    let _entry_3 = runtime.spawn_handle(pool.check_out()).wait().unwrap();
 
-    let mut handle = runtime.spawn_handle(pool.check_out());
-    let handle = runtime
-        .spawn_handle(lazy(move || {
-            assert!(handle.poll().unwrap().is_not_ready());
-            ok::<_, ()>(handle)
-        }))
-        .wait()
-        .unwrap();
+    let check_out_0 = pool.check_out().await.unwrap();
+    let _check_out_1 = pool.check_out().await.unwrap();
+    let _check_out_2 = pool.check_out().await.unwrap();
+    let _check_out_3 = pool.check_out().await.unwrap();
 
-    mem::drop(entry_0);
-
-    let entry_0 = handle.wait().unwrap();
-    assert_eq!(0, entry_0.id);
+    let check_out_future = pool.check_out();
+    futures::pin_mut!(check_out_future);
+    assert!(try_poll(check_out_future.as_mut()).await.is_none());
+    mem::drop(check_out_0);
+    assert!(try_poll(check_out_future.as_mut()).await.is_some());
 }
 
-#[test]
-fn recycle_resource() {
-    PanicOnError::init();
+#[tokio::test]
+async fn recycle_resource() {
+    init_dependencies();
 
-    let (runtime, now) = build_pool();
+    let builder = Builder::new();
+    let pool = builder.build(4, TestManager::new());
 
-    let pool = Builder::new()
-        .recycle_interval(Duration::from_secs(30))
-        .build(1, TestManager::new());
-
-    for _ in 0..2 {
-        let resource = runtime.spawn_handle(pool.check_out()).wait().unwrap();
+    for _ in 0..2u32 {
+        let resource = pool.check_out().await.unwrap();
         assert_eq!(0, resource.id);
         assert_eq!(0, resource.recycle_count);
     }
 
-    {
-        let mut lock = now.lock().unwrap();
-        *lock += Duration::from_secs(60);
-    }
+    NOW.with(|now| {
+        let now = now.borrow();
+        let mut now = now.lock().unwrap();
+        *now += Duration::from_secs(60);
+    });
 
-    for _ in 0..2 {
-        let resource = runtime.spawn_handle(pool.check_out()).wait().unwrap();
+    for _ in 0..2u32 {
+        let resource = pool.check_out().await.unwrap();
         assert_eq!(0, resource.id);
         assert_eq!(1, resource.recycle_count);
+    }
+}
+
+async fn try_poll<F: Future>(f: Pin<&mut F>) -> Option<F::Output> {
+    ReturnsImmediately(f).await
+}
+
+struct ReturnsImmediately<'f, F>(Pin<&'f mut F>);
+
+impl<'f, F: Future> Future for ReturnsImmediately<'f, F> {
+    type Output = Option<F::Output>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        match self.0.as_mut().poll(cx) {
+            Poll::Ready(result) => Poll::Ready(Some(result)),
+            Poll::Pending => Poll::Ready(None),
+        }
     }
 }
