@@ -1,6 +1,6 @@
 [package]
 name = "tokio-resource-pool"
-version = "0.5.0-alpha.0"
+version = "0.5.0-alpha.1"
 license = "MIT"
 authors = ["Simon Génier <1782845+animalsiknow@users.noreply.github.com>"]
 edition = "2018"
@@ -15,7 +15,7 @@ categories = ["asynchronous"]
 crossbeam-queue = "0.1"
 futures-preview = "0.3.0-alpha.18"
 log = "0.4"
-tokio-sync = "0.2.0-alpha.4"
+tokio-sync = "0.2.0-alpha.5"
 
 [dev-dependencies]
-tokio = "0.2.0-alpha.4"
+tokio = "0.2.0-alpha.5"
